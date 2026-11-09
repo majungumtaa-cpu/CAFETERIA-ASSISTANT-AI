@@ -15,14 +15,17 @@ const app = express();
 const PORT = process.env.PORT || 3005;
 const MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-20b';
 const MAX_TOKENS = Number(process.env.MAX_COMPLETION_TOKENS) || 700;
+const API_KEY = process.env.GROQ_API_KEY?.trim();
 
-if (!process.env.GROQ_API_KEY) {
-    console.error('ERROR: GROQ_API_KEY is missing from .env');
+if (!API_KEY) {
+    console.error('ERROR: GROQ_API_KEY is missing.');
     process.exit(1);
 }
 
 const groq = new Groq({
-    apiKey: process.env.GROQ_API_KEY.trim()
+    apiKey: API_KEY,
+    timeout: 60000,
+    maxRetries: 2
 });
 
 // ======================================
@@ -32,9 +35,9 @@ const groq = new Groq({
 app.use(express.json({ limit: '2mb' }));
 
 app.use((req, res, next) => {
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
     if (req.method === 'OPTIONS') {
         return res.sendStatus(204);
@@ -43,23 +46,10 @@ app.use((req, res, next) => {
     next();
 });
 
-// Prevent access to private server files.
-app.use((req, res, next) => {
-    const blocked = [
-        '/.env',
-        '/server.js',
-        '/package.json',
-        '/package-lock.json'
-    ];
+// ======================================
+// STATIC FILES
+// ======================================
 
-    if (blocked.includes(req.path)) {
-        return res.sendStatus(404);
-    }
-
-    next();
-});
-
-// Static files
 app.use(express.static(__dirname, {
     index: false,
     dotfiles: 'ignore'
@@ -125,6 +115,19 @@ function prepareHistory(history) {
 }
 
 // ======================================
+// HEALTH CHECK
+// ======================================
+
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        service: 'Cafeteria Assistant',
+        model: MODEL,
+        apiKeyConfigured: Boolean(API_KEY)
+    });
+});
+
+// ======================================
 // CHAT API
 // ======================================
 
@@ -137,10 +140,7 @@ app.post('/api/chat', async (req, res) => {
         language = 'en'
     } = req.body || {};
 
-    if (
-        typeof message !== 'string' ||
-        !message.trim()
-    ) {
+    if (typeof message !== 'string' || !message.trim()) {
         return res.status(400).json({
             error: 'Please provide a valid message.'
         });
@@ -153,27 +153,19 @@ app.post('/api/chat', async (req, res) => {
     }
 
     // ==================================
-    // CAFETERIA DATABASE DATA
+    // CAFETERIA DATA
     // ==================================
 
     const data = cafeteria_data || {};
 
-    const menu = Array.isArray(data.menu)
-        ? data.menu
-        : [];
-
-    const events = Array.isArray(data.events)
-        ? data.events
-        : [];
+    const menu = Array.isArray(data.menu) ? data.menu : [];
+    const events = Array.isArray(data.events) ? data.events : [];
 
     const paymentMethods = Array.isArray(data.payment_methods)
         ? data.payment_methods
         : [];
 
-    const team = Array.isArray(data.team)
-        ? data.team
-        : [];
-
+    const team = Array.isArray(data.team) ? data.team : [];
     const stats = data.stats || {};
 
     // ==================================
@@ -440,10 +432,8 @@ Never fabricate cafeteria information.
     ];
 
     // ==================================
-    // STREAMING RESPONSE
+    // GROQ STREAMING
     // ==================================
-
-    let stream;
 
     try {
 
@@ -451,7 +441,7 @@ Never fabricate cafeteria information.
             `[CHAT] Model: ${MODEL} | Language: ${language} | Menu: ${menu.length}`
         );
 
-        stream = await groq.chat.completions.create({
+        const stream = await groq.chat.completions.create({
             messages: messagesPayload,
             model: MODEL,
             temperature: 0.2,
@@ -459,16 +449,18 @@ Never fabricate cafeteria information.
             stream: true
         });
 
-        // Send headers immediately.
         res.status(200);
+
         res.setHeader(
             'Content-Type',
             'text/plain; charset=utf-8'
         );
+
         res.setHeader(
             'Cache-Control',
             'no-cache, no-transform'
         );
+
         res.setHeader(
             'X-Accel-Buffering',
             'no'
@@ -476,7 +468,6 @@ Never fabricate cafeteria information.
 
         res.flushHeaders();
 
-        // Display AI response as soon as tokens arrive.
         for await (const chunk of stream) {
 
             if (res.destroyed) {
@@ -510,14 +501,27 @@ Never fabricate cafeteria information.
                 error.status === 429 ? 429 :
                 error.status === 400 ? 400 : 500;
 
+            let errorMessage =
+                'Unable to generate a response. Please try again.';
+
+            if (error.status === 401) {
+                errorMessage =
+                    'Invalid API key. Check your GROQ_API_KEY in Render Environment.';
+            }
+
+            if (error.status === 429) {
+                errorMessage =
+                    'AI request limit reached. Please try again shortly.';
+            }
+
+            if (error.status === 400) {
+                errorMessage =
+                    'Invalid request. Check the model and request parameters.';
+            }
+
             return res.status(status).json({
                 error: 'AI service error',
-                message:
-                    error.status === 401
-                        ? 'Invalid API key. Check your GROQ_API_KEY.'
-                        : error.status === 429
-                        ? 'AI request limit reached. Please try again shortly.'
-                        : 'Unable to generate a response. Please try again.'
+                message: errorMessage
             });
         }
 
@@ -525,18 +529,6 @@ Never fabricate cafeteria information.
             res.end('\nUnable to complete the response.');
         }
     }
-});
-
-// ======================================
-// HEALTH CHECK
-// ======================================
-
-app.get('/health', (req, res) => {
-    res.json({
-        status: 'ok',
-        service: 'Cafeteria Assistant',
-        model: MODEL
-    });
 });
 
 // ======================================
@@ -551,11 +543,12 @@ app.get('/', (req, res) => {
 // START SERVER
 // ======================================
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
     console.log('================================');
     console.log('CAFETERIA ASSISTANT IS RUNNING');
     console.log(`PORT: ${PORT}`);
     console.log(`MODEL: ${MODEL}`);
     console.log('STREAMING: ENABLED');
+    console.log('GROQ API KEY: CONFIGURED');
     console.log('================================');
 });
