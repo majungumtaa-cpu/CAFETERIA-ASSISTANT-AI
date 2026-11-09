@@ -119,13 +119,13 @@ The application follows a client-server architecture in which the main cafeteria
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/majungumtaa-cpu/REPOSITORY-NAME.git
+git clone https://github.com/majungumtaa-cpu/expertFinance.git
 ```
 
 2. Navigate to the project directory:
 
 ```bash
-cd REPOSITORY-NAME
+cd https://github.com/majungumtaa-cpu/expertFinance
 ```
 
 3. Configure the PHP application using your local or hosting server.
